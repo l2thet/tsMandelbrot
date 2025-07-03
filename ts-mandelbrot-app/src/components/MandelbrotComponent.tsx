@@ -9,6 +9,9 @@ const MandelbrotComponent: React.FC = () => {
     const [center, setCenter] = useState(INITIAL_CENTER);
     const [scale, setScale] = useState(INITIAL_SCALE);
 
+    const [progress, setProgress] = useState(0);
+    const [isRendering, setIsRendering] = useState(false);
+
     useEffect(() => {
         const handleResize = () => {
             setDimensions({ width: window.innerWidth, height: window.innerHeight });
@@ -29,6 +32,7 @@ const MandelbrotComponent: React.FC = () => {
     }, []);
 
     useEffect(() => {
+        let cancelled = false;
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
@@ -39,36 +43,89 @@ const MandelbrotComponent: React.FC = () => {
         canvas.height = height;
         const maxIter = 1000;
 
-        for (let x = 0; x < width; x++) {
-            for (let y = 0; y < height; y++) {
-                const cx = center.x + (x - width / 2) * (scale * 2) / width;
-                const cy = center.y + (y - height / 2) * (scale * 2) / width;
-                let zx = 0, zy = 0;
-                let iter = 0;
+        setIsRendering(true);
+        setProgress(0);
 
-                while (zx * zx + zy * zy < 4 && iter < maxIter) {
-                    const xtemp = zx * zx - zy * zy + cx;
-                    zy = 2 * zx * zy + cy;
-                    zx = xtemp;
-                    iter++;
+        // Create ImageData for faster pixel manipulation
+        const imageData = ctx.createImageData(width, height);
+        const data = imageData.data;
+
+        const chunkSize = Math.max(1, Math.floor(height / 10));
+        let currentRow = 0;
+
+        const renderChunk = () => {
+            if (cancelled) return;
+
+            const endRow = Math.min(currentRow + chunkSize, height);
+
+            for (let y = currentRow; y < endRow; y++) {
+                for (let x = 0; x < width; x++) {
+                    const cx = center.x + (x - width / 2) * (scale * 2) / width;
+                    const cy = center.y + (y - height / 2) * (scale * 2) / width;
+                    let zx = 0, zy = 0;
+                    let iter = 0;
+
+                    while (zx * zx + zy * zy < 4 && iter < maxIter) {
+                        const xtemp = zx * zx - zy * zy + cx;
+                        zy = 2 * zx * zy + cy;
+                        zx = xtemp;
+                        iter++;
+                    }
+
+                    let r, g, b;
+                    if (iter === maxIter) {
+                        r = g = b = 0;
+                    } else {
+                        const t = Math.min(1, Math.max(0, iter / 255));
+                        r = Math.floor(9 * (1 - t) * t * t * t * 255);
+                        g = Math.floor(15 * (1 - t) * (1 - t) * t * t * 255);
+                        b = Math.floor(8.5 * (1 - t) * (1 - t) * (1 - t) * t * 255);
+                    }
+
+                    // Set pixel in ImageData
+                    const pixelIndex = (y * width + x) * 4;
+                    data[pixelIndex] = r;     // Red
+                    data[pixelIndex + 1] = g; // Green
+                    data[pixelIndex + 2] = b; // Blue
+                    data[pixelIndex + 3] = 255; // Alpha
                 }
-
-                let color: string;
-                if (iter === maxIter) {
-                    color = 'rgb(0,0,0)';
-                } else {
-                    const t = Math.min(1, Math.max(0, iter / 255));
-
-                    const r = Math.floor(9 * (1 - t) * t * t * t * 255);
-                    const g = Math.floor(15 * (1 - t) * (1 - t) * t * t * 255);
-                    const b = Math.floor(8.5 * (1 - t) * (1 - t) * (1 - t) * t * 255);
-
-                    color = `rgb(${r},${g},${b})`;
-                }
-                ctx.fillStyle = color;
-                ctx.fillRect(x, y, 1, 1);
             }
-        }
+
+            // Update progress and display the rendered chunk immediately
+            setProgress(Math.round((endRow / height) * 100));
+
+            // Display the chunk that was just rendered
+            const chunkImageData = ctx.createImageData(width, chunkSize);
+            const chunkData = chunkImageData.data;
+
+            // Copy the rendered chunk from the main imageData
+            for (let y = 0; y < chunkSize && (currentRow + y) < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const srcIndex = ((currentRow + y) * width + x) * 4;
+                    const destIndex = (y * width + x) * 4;
+                    chunkData[destIndex] = data[srcIndex];
+                    chunkData[destIndex + 1] = data[srcIndex + 1];
+                    chunkData[destIndex + 2] = data[srcIndex + 2];
+                    chunkData[destIndex + 3] = data[srcIndex + 3];
+                }
+            }
+
+            // Draw the chunk to the canvas
+            ctx.putImageData(chunkImageData, 0, currentRow);
+
+            currentRow = endRow;
+
+            if (currentRow < height) {
+                // Use requestAnimationFrame for smooth progress updates
+                requestAnimationFrame(renderChunk);
+            } else {
+                setIsRendering(false);
+            }
+        };
+
+        renderChunk();
+
+        return () => { cancelled = true; };
     }, [dimensions, center, scale]);
 
     // Left click: zoom in, right click: zoom out
@@ -103,14 +160,34 @@ const MandelbrotComponent: React.FC = () => {
     };
 
     return (
-        <canvas
-            ref={canvasRef}
-            width={dimensions.width}
-            height={dimensions.height}
-            style={{ display: 'block', position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh' }}
-            onClick={handleCanvasClick}
-            onContextMenu={handleCanvasContextMenu}
-        />
+        <>
+            {isRendering && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    width: '100vw',
+                    height: 6,
+                    background: 'rgba(30,30,30,0.5)',
+                    zIndex: 1000
+                }}>
+                    <div style={{
+                        width: `${progress}%`,
+                        height: '100%',
+                        background: 'linear-gradient(90deg, #00f, #fff)',
+                        transition: 'width 0.1s'
+                    }} />
+                </div>
+            )}
+            <canvas
+                ref={canvasRef}
+                width={dimensions.width}
+                height={dimensions.height}
+                style={{ display: 'block', position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh' }}
+                onClick={handleCanvasClick}
+                onContextMenu={handleCanvasContextMenu}
+            />
+        </>
     );
 };
 
